@@ -9,16 +9,21 @@ video encoding with quality preservation and audio track handling.
 import cv2
 import numpy as np
 import logging
+import gc
+import psutil
+import time
 from pathlib import Path
-from typing import Optional, Dict, Any, Callable, List
+from typing import Optional, Dict, Any, Callable, List, Tuple
 from dataclasses import dataclass
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from models.processing_job import ProcessingJob, JobStatus
 from models.video_metadata import VideoMetadata
 from models.face_detection import FaceDetection
 from processing.face_detector import FaceDetector, FaceDetectorConfig
 from processing.face_blurrer import FaceBlurrer, FaceBlurrerConfig
+from processing.progress_service import progress_service, ProgressTracker
 from storage.file_manager import FileManager
 
 logger = logging.getLogger(__name__)
@@ -35,6 +40,17 @@ class VideoProcessorConfig:
     # Processing settings
     max_frames_per_batch: int = 30  # Process frames in batches for memory efficiency
     progress_callback_interval: int = 10  # Report progress every N frames
+    
+    # Performance optimization settings
+    enable_frame_skipping: bool = False  # Skip frames for very large videos
+    frame_skip_ratio: int = 2  # Process every Nth frame when skipping enabled
+    max_resolution: Optional[Tuple[int, int]] = None  # Downscale if larger (width, height)
+    memory_limit_mb: int = 1024  # Memory limit in MB for processing
+    enable_gpu_acceleration: bool = False  # Use GPU if available
+    
+    # Large file handling
+    chunk_size_mb: int = 100  # Process video in chunks for large files
+    temp_cleanup_interval: int = 50  # Clean temp files every N frames
     
     # Face detection and blurring configs
     face_detector_config: Optional[FaceDetectorConfig] = None
@@ -90,6 +106,17 @@ class VideoProcessor:
         self.current_job: Optional[ProcessingJob] = None
         self.video_metadata: Optional[VideoMetadata] = None
         self.total_faces_detected = 0
+        self.progress_tracker: Optional[ProgressTracker] = None
+        
+        # Performance monitoring
+        self.processing_stats = {
+            'start_time': None,
+            'frames_processed': 0,
+            'memory_usage_mb': 0,
+            'avg_frame_time': 0.0,
+            'peak_memory_mb': 0,
+            'frames_skipped': 0
+        }
         
     def process_video(self, job: ProcessingJob, 
                      progress_callback: Optional[Callable[[float, str], None]] = None) -> str:
@@ -111,6 +138,13 @@ class VideoProcessor:
         output_path = None
         
         try:
+            # Create progress tracker for detailed progress reporting
+            self.progress_tracker = progress_service.create_tracker(
+                job.job_id, 
+                total_frames=0  # Will be updated after metadata extraction
+            )
+            self.progress_tracker.start("Initializing video processing")
+            
             # Update job status
             job.mark_processing()
             
@@ -123,11 +157,19 @@ class VideoProcessor:
                 raise VideoProcessingError(f"Input video file not found: {input_path}")
             
             # Validate video file integrity
+            self.progress_tracker.update_progress(2.0, "Validating video file")
             if not self._validate_video_integrity(input_path):
                 raise VideoProcessingError("Video file appears to be corrupted or unreadable")
             
             # Extract video metadata
+            self.progress_tracker.update_progress(5.0, "Extracting video metadata")
             self.video_metadata = self._extract_video_metadata(input_path)
+            
+            # Update progress tracker with total frames
+            if self.video_metadata:
+                total_frames = int(self.video_metadata.fps * self.video_metadata.duration)
+                self.progress_tracker.metrics.total_frames = total_frames
+            
             if progress_callback:
                 progress_callback(0.1, "Video metadata extracted")
             
@@ -155,6 +197,13 @@ class VideoProcessor:
             # Mark job as completed
             job.mark_completed(str(output_path), self.total_faces_detected)
             
+            # Update progress tracker
+            if self.progress_tracker:
+                completion_message = (f"Processing complete. {self.total_faces_detected} faces detected and blurred." 
+                                    if self.total_faces_detected > 0 
+                                    else "Processing complete. No faces detected - original video preserved.")
+                self.progress_tracker.mark_completed(completion_message)
+            
             if progress_callback:
                 if self.total_faces_detected > 0:
                     progress_callback(1.0, f"Processing complete. {self.total_faces_detected} faces detected and blurred.")
@@ -168,6 +217,10 @@ class VideoProcessor:
             error_msg = self._categorize_processing_error(e)
             logger.error(f"Job {job.job_id}: {error_msg}")
             job.mark_failed(error_msg)
+            
+            # Update progress tracker
+            if self.progress_tracker:
+                self.progress_tracker.mark_failed(error_msg)
             
             # Clean up any partial output files
             if output_path and Path(output_path).exists():
@@ -256,7 +309,7 @@ class VideoProcessor:
     def _process_video_frames(self, input_path: Path, output_path: Path, 
                             progress_callback: Optional[Callable[[float, str], None]] = None) -> None:
         """
-        Process video frames with face detection and blurring.
+        Process video frames with face detection and blurring with performance optimizations.
         
         Args:
             input_path: Path to input video
@@ -270,6 +323,10 @@ class VideoProcessor:
         output_writer = None
         
         try:
+            # Initialize performance monitoring
+            self.processing_stats['start_time'] = time.time()
+            self.processing_stats['frames_processed'] = 0
+            
             # Open input video
             input_cap = cv2.VideoCapture(str(input_path))
             if not input_cap.isOpened():
@@ -281,46 +338,43 @@ class VideoProcessor:
             height = int(input_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             total_frames = int(input_cap.get(cv2.CAP_PROP_FRAME_COUNT))
             
+            # Apply resolution optimization if needed
+            output_width, output_height = self._optimize_resolution(width, height)
+            scale_factor = output_width / width if width > 0 else 1.0
+            
+            # Determine if frame skipping should be enabled for large videos
+            should_skip_frames = self._should_enable_frame_skipping(total_frames, width, height)
+            
             # Define codec and create VideoWriter
             fourcc = cv2.VideoWriter_fourcc(*self.config.output_codec)
             output_writer = cv2.VideoWriter(
                 str(output_path),
                 fourcc,
                 fps,
-                (width, height)
+                (output_width, output_height)
             )
             
             if not output_writer.isOpened():
                 raise VideoProcessingError(f"Could not create output video writer: {output_path}")
             
-            # Process frames
-            frame_number = 0
-            frames_batch = []
-            
-            while True:
-                ret, frame = input_cap.read()
-                if not ret:
-                    break
-                
-                # Process frame for face detection and blurring
-                processed_frame = self._process_single_frame(frame, frame_number)
-                
-                # Write processed frame
-                output_writer.write(processed_frame)
-                
-                frame_number += 1
-                
-                # Report progress
-                if progress_callback and frame_number % self.config.progress_callback_interval == 0:
-                    progress = 0.1 + (0.8 * frame_number / total_frames)  # 10% to 90%
-                    message = f"Processing frame {frame_number}/{total_frames}"
-                    progress_callback(progress, message)
+            # Process frames with optimizations
+            if self.config.max_frames_per_batch > 1:
+                self._process_frames_batch_mode(
+                    input_cap, output_writer, total_frames, scale_factor, 
+                    should_skip_frames, progress_callback
+                )
+            else:
+                self._process_frames_sequential(
+                    input_cap, output_writer, total_frames, scale_factor,
+                    should_skip_frames, progress_callback
+                )
             
             # Handle audio preservation if enabled
             if self.config.preserve_audio:
                 self._preserve_audio_track(input_path, output_path, progress_callback)
             
-            logger.info(f"Processed {frame_number} frames, detected {self.total_faces_detected} faces total")
+            # Log performance statistics
+            self._log_performance_stats()
             
         except Exception as e:
             raise VideoProcessingError(f"Frame processing failed: {e}") from e
@@ -331,6 +385,9 @@ class VideoProcessor:
                 input_cap.release()
             if output_writer:
                 output_writer.release()
+            
+            # Force garbage collection
+            gc.collect()
     
     def _process_single_frame(self, frame: np.ndarray, frame_number: int) -> np.ndarray:
         """
@@ -438,13 +495,17 @@ class VideoProcessor:
             'face_track_info': self.face_blurrer.get_track_info(),
         }
         
+        # Add performance statistics
+        stats.update(self.processing_stats)
+        
         if self.video_metadata:
             stats.update({
                 'video_duration': self.video_metadata.duration,
                 'video_fps': self.video_metadata.fps,
                 'video_resolution': self.video_metadata.resolution,
                 'video_format': self.video_metadata.format,
-                'total_frames': self.video_metadata.total_frames,
+                'total_frames': getattr(self.video_metadata, 'total_frames', 
+                                      int(self.video_metadata.fps * self.video_metadata.duration) if self.video_metadata.fps and self.video_metadata.duration else 0),
             })
         
         return stats
@@ -532,9 +593,347 @@ class VideoProcessor:
         else:
             return f"Video processing failed: {str(error)}"
     
+    def _optimize_resolution(self, width: int, height: int) -> Tuple[int, int]:
+        """
+        Optimize video resolution for processing performance.
+        
+        Args:
+            width: Original video width
+            height: Original video height
+            
+        Returns:
+            Optimized (width, height) tuple
+        """
+        if self.config.max_resolution is None:
+            return width, height
+        
+        max_width, max_height = self.config.max_resolution
+        
+        # Calculate scale factor to fit within max resolution
+        scale_w = max_width / width if width > max_width else 1.0
+        scale_h = max_height / height if height > max_height else 1.0
+        scale_factor = min(scale_w, scale_h)
+        
+        if scale_factor < 1.0:
+            new_width = int(width * scale_factor)
+            new_height = int(height * scale_factor)
+            
+            # Ensure dimensions are even (required by some codecs)
+            new_width = new_width - (new_width % 2)
+            new_height = new_height - (new_height % 2)
+            
+            logger.info(f"Downscaling video from {width}x{height} to {new_width}x{new_height}")
+            return new_width, new_height
+        
+        return width, height
+    
+    def _should_enable_frame_skipping(self, total_frames: int, width: int, height: int) -> bool:
+        """
+        Determine if frame skipping should be enabled based on video characteristics.
+        
+        Args:
+            total_frames: Total number of frames
+            width: Video width
+            height: Video height
+            
+        Returns:
+            True if frame skipping should be enabled
+        """
+        if not self.config.enable_frame_skipping:
+            return False
+        
+        # Calculate video size metrics
+        pixels_per_frame = width * height
+        total_pixels = pixels_per_frame * total_frames
+        
+        # Enable frame skipping for very large videos
+        large_video_threshold = 1920 * 1080 * 1800  # ~30 minutes of 1080p at 30fps
+        
+        return total_pixels > large_video_threshold
+    
+    def _process_frames_batch_mode(self, input_cap, output_writer, total_frames: int, 
+                                 scale_factor: float, should_skip_frames: bool,
+                                 progress_callback: Optional[Callable[[float, str], None]] = None) -> None:
+        """
+        Process frames in batch mode for better performance.
+        
+        Args:
+            input_cap: Input video capture
+            output_writer: Output video writer
+            total_frames: Total number of frames
+            scale_factor: Resolution scale factor
+            should_skip_frames: Whether to skip frames
+            progress_callback: Optional progress callback
+        """
+        frame_number = 0
+        frames_batch = []
+        
+        while True:
+            ret, frame = input_cap.read()
+            if not ret:
+                # Process remaining frames in batch
+                if frames_batch:
+                    self._process_frame_batch(frames_batch, output_writer, scale_factor)
+                break
+            
+            # Skip frames if enabled
+            if should_skip_frames and frame_number % self.config.frame_skip_ratio != 0:
+                # For skipped frames, duplicate the last processed frame
+                if frames_batch:
+                    output_writer.write(frames_batch[-1]['processed'])
+                else:
+                    # If no previous frame, process this one
+                    processed_frame = self._process_single_frame_optimized(frame, frame_number, scale_factor)
+                    output_writer.write(processed_frame)
+                
+                self.processing_stats['frames_skipped'] += 1
+                frame_number += 1
+                continue
+            
+            # Add frame to batch
+            frames_batch.append({
+                'original': frame,
+                'frame_number': frame_number,
+                'processed': None
+            })
+            
+            # Process batch when full
+            if len(frames_batch) >= self.config.max_frames_per_batch:
+                self._process_frame_batch(frames_batch, output_writer, scale_factor)
+                frames_batch.clear()
+                
+                # Memory management
+                self._manage_memory()
+            
+            frame_number += 1
+            
+            # Report progress
+            if frame_number % self.config.progress_callback_interval == 0:
+                progress = 10.0 + (80.0 * frame_number / total_frames)
+                memory_mb = self._get_memory_usage()
+                message = f"Processing frame {frame_number}/{total_frames} (Memory: {memory_mb}MB)"
+                
+                # Update progress tracker
+                if self.progress_tracker:
+                    self.progress_tracker.update_progress(
+                        progress, message, frame_number,
+                        memory_mb=memory_mb
+                    )
+                
+                # Call external callback
+                if progress_callback:
+                    progress_callback(progress / 100.0, message)
+    
+    def _process_frames_sequential(self, input_cap, output_writer, total_frames: int,
+                                 scale_factor: float, should_skip_frames: bool,
+                                 progress_callback: Optional[Callable[[float, str], None]] = None) -> None:
+        """
+        Process frames sequentially (original method with optimizations).
+        
+        Args:
+            input_cap: Input video capture
+            output_writer: Output video writer
+            total_frames: Total number of frames
+            scale_factor: Resolution scale factor
+            should_skip_frames: Whether to skip frames
+            progress_callback: Optional progress callback
+        """
+        frame_number = 0
+        last_processed_frame = None
+        
+        while True:
+            ret, frame = input_cap.read()
+            if not ret:
+                break
+            
+            # Skip frames if enabled
+            if should_skip_frames and frame_number % self.config.frame_skip_ratio != 0:
+                if last_processed_frame is not None:
+                    output_writer.write(last_processed_frame)
+                else:
+                    processed_frame = self._process_single_frame_optimized(frame, frame_number, scale_factor)
+                    output_writer.write(processed_frame)
+                    last_processed_frame = processed_frame
+                
+                self.processing_stats['frames_skipped'] += 1
+                frame_number += 1
+                continue
+            
+            # Process frame
+            processed_frame = self._process_single_frame_optimized(frame, frame_number, scale_factor)
+            output_writer.write(processed_frame)
+            last_processed_frame = processed_frame
+            
+            frame_number += 1
+            self.processing_stats['frames_processed'] += 1
+            
+            # Memory management
+            if frame_number % self.config.temp_cleanup_interval == 0:
+                self._manage_memory()
+            
+            # Report progress
+            if frame_number % self.config.progress_callback_interval == 0:
+                progress = 10.0 + (80.0 * frame_number / total_frames)
+                memory_mb = self._get_memory_usage()
+                message = f"Processing frame {frame_number}/{total_frames} (Memory: {memory_mb}MB)"
+                
+                # Update progress tracker
+                if self.progress_tracker:
+                    self.progress_tracker.update_progress(
+                        progress, message, frame_number,
+                        memory_mb=memory_mb
+                    )
+                
+                # Call external callback
+                if progress_callback:
+                    progress_callback(progress / 100.0, message)
+    
+    def _process_frame_batch(self, frames_batch: List[Dict], output_writer, scale_factor: float) -> None:
+        """
+        Process a batch of frames for better performance.
+        
+        Args:
+            frames_batch: List of frame dictionaries
+            output_writer: Output video writer
+            scale_factor: Resolution scale factor
+        """
+        frame_start_time = time.time()
+        
+        # Process frames in parallel if beneficial
+        if len(frames_batch) > 4:  # Only use threading for larger batches
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = []
+                for frame_data in frames_batch:
+                    future = executor.submit(
+                        self._process_single_frame_optimized,
+                        frame_data['original'],
+                        frame_data['frame_number'],
+                        scale_factor
+                    )
+                    futures.append((future, frame_data))
+                
+                # Collect results in order
+                for future, frame_data in futures:
+                    frame_data['processed'] = future.result()
+        else:
+            # Process sequentially for small batches
+            for frame_data in frames_batch:
+                frame_data['processed'] = self._process_single_frame_optimized(
+                    frame_data['original'],
+                    frame_data['frame_number'],
+                    scale_factor
+                )
+        
+        # Write all processed frames
+        for frame_data in frames_batch:
+            output_writer.write(frame_data['processed'])
+            self.processing_stats['frames_processed'] += 1
+        
+        # Update timing statistics
+        batch_time = time.time() - frame_start_time
+        frames_count = len(frames_batch)
+        if frames_count > 0:
+            avg_time = batch_time / frames_count
+            self.processing_stats['avg_frame_time'] = (
+                (self.processing_stats['avg_frame_time'] * 0.9) + (avg_time * 0.1)
+            )
+    
+    def _process_single_frame_optimized(self, frame: np.ndarray, frame_number: int, scale_factor: float) -> np.ndarray:
+        """
+        Process a single frame with performance optimizations.
+        
+        Args:
+            frame: Input frame
+            frame_number: Frame number
+            scale_factor: Resolution scale factor
+            
+        Returns:
+            Processed frame
+        """
+        if frame is None or frame.size == 0:
+            logger.warning(f"Frame {frame_number} is empty or invalid")
+            return frame
+        
+        # Apply resolution scaling if needed
+        if scale_factor != 1.0:
+            new_height = int(frame.shape[0] * scale_factor)
+            new_width = int(frame.shape[1] * scale_factor)
+            frame = cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_AREA)
+        
+        # Use the original processing method
+        return self._process_single_frame(frame, frame_number)
+    
+    def _manage_memory(self) -> None:
+        """
+        Manage memory usage during processing.
+        """
+        current_memory = self._get_memory_usage()
+        self.processing_stats['memory_usage_mb'] = current_memory
+        
+        if current_memory > self.processing_stats['peak_memory_mb']:
+            self.processing_stats['peak_memory_mb'] = current_memory
+        
+        # Force garbage collection if memory usage is high
+        if current_memory > self.config.memory_limit_mb:
+            logger.warning(f"High memory usage detected: {current_memory}MB. Running garbage collection.")
+            gc.collect()
+            
+            # Check memory again after GC
+            new_memory = self._get_memory_usage()
+            logger.info(f"Memory after GC: {new_memory}MB (freed {current_memory - new_memory}MB)")
+    
+    def _get_memory_usage(self) -> int:
+        """
+        Get current memory usage in MB.
+        
+        Returns:
+            Memory usage in megabytes
+        """
+        try:
+            process = psutil.Process()
+            memory_info = process.memory_info()
+            return int(memory_info.rss / 1024 / 1024)  # Convert to MB
+        except Exception:
+            return 0
+    
+    def _log_performance_stats(self) -> None:
+        """
+        Log performance statistics after processing.
+        """
+        if self.processing_stats['start_time']:
+            total_time = time.time() - self.processing_stats['start_time']
+            frames_processed = self.processing_stats['frames_processed']
+            frames_skipped = self.processing_stats['frames_skipped']
+            
+            fps = frames_processed / total_time if total_time > 0 else 0
+            
+            logger.info(f"Processing completed in {total_time:.2f}s")
+            logger.info(f"Frames processed: {frames_processed}, skipped: {frames_skipped}")
+            logger.info(f"Average FPS: {fps:.2f}")
+            logger.info(f"Peak memory usage: {self.processing_stats['peak_memory_mb']}MB")
+            logger.info(f"Average frame processing time: {self.processing_stats['avg_frame_time']:.4f}s")
+    
     def cleanup_resources(self) -> None:
         """Clean up any resources used by the processor."""
         self.face_blurrer.reset_tracking()
         self.current_job = None
         self.video_metadata = None
         self.total_faces_detected = 0
+        
+        # Clean up progress tracker
+        if self.progress_tracker:
+            progress_service.remove_tracker(self.progress_tracker.operation_id)
+            self.progress_tracker = None
+        
+        # Reset performance stats
+        self.processing_stats = {
+            'start_time': None,
+            'frames_processed': 0,
+            'memory_usage_mb': 0,
+            'avg_frame_time': 0.0,
+            'peak_memory_mb': 0,
+            'frames_skipped': 0
+        }
+        
+        # Force garbage collection
+        gc.collect()
