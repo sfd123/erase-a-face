@@ -309,6 +309,16 @@ class CleanupService:
             self.cleanup_interval = timedelta(minutes=kwargs['cleanup_interval_minutes'])
         
         logger.info(f"Updated cleanup service configuration: {kwargs}")
+    
+    async def start_periodic_cleanup(self) -> None:
+        """
+        Start periodic cleanup as a background task.
+        
+        This method is designed to be called from the main application
+        startup to run cleanup as a background service.
+        """
+        logger.info("Starting periodic cleanup service")
+        await self.start()
 
 
 # Global cleanup service instance
@@ -319,7 +329,17 @@ def get_cleanup_service() -> CleanupService:
     """Get the global cleanup service instance."""
     global _cleanup_service
     if _cleanup_service is None:
-        raise RuntimeError("Cleanup service not initialized. Call initialize_cleanup_service() first.")
+        # Auto-initialize with default dependencies
+        from storage.job_queue import get_job_queue
+        from storage.file_manager import get_file_manager
+        import config
+        
+        cleanup_interval = getattr(config, 'CLEANUP_INTERVAL_MINUTES', 30)
+        _cleanup_service = initialize_cleanup_service(
+            get_job_queue(), 
+            get_file_manager(), 
+            cleanup_interval
+        )
     return _cleanup_service
 
 

@@ -401,3 +401,113 @@ class JobQueue:
             return True
         except RedisError:
             return False
+    
+    async def initialize(self) -> None:
+        """
+        Initialize the job queue for startup.
+        
+        Performs any necessary setup operations like checking Redis connection
+        and cleaning up any stale jobs from previous runs.
+        """
+        try:
+            # Test Redis connection
+            if not self.health_check():
+                raise JobQueueError("Redis connection is not healthy")
+            
+            # Clean up any jobs that were in processing state from previous runs
+            # These would be jobs that were interrupted during processing
+            stale_jobs = []
+            
+            # Get all job keys
+            job_keys = self.redis_client.keys(f"{self.job_key_prefix}*")
+            
+            for job_key in job_keys:
+                job_data = self.redis_client.get(job_key)
+                if job_data:
+                    try:
+                        job = self._deserialize_job(job_data)
+                        if job.status == JobStatus.PROCESSING:
+                            # Mark as failed since it was interrupted
+                            job.status = JobStatus.FAILED
+                            job.error_message = "Job interrupted during service restart"
+                            job.completed_at = datetime.now()
+                            
+                            # Update in Redis
+                            self.redis_client.set(job_key, self._serialize_job(job))
+                            stale_jobs.append(job.job_id)
+                    except Exception as e:
+                        logger.warning(f"Failed to process stale job {job_key}: {e}")
+            
+            if stale_jobs:
+                logger.info(f"Cleaned up {len(stale_jobs)} stale jobs: {stale_jobs}")
+            
+            logger.info("Job queue initialized successfully")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize job queue: {e}")
+            raise JobQueueError(f"Job queue initialization failed: {e}")
+    
+    async def cleanup(self) -> None:
+        """
+        Cleanup job queue resources during shutdown.
+        
+        Performs graceful shutdown operations like marking in-progress jobs
+        as interrupted and closing Redis connections.
+        """
+        try:
+            # Mark any currently processing jobs as interrupted
+            interrupted_jobs = []
+            
+            # Get all job keys
+            job_keys = self.redis_client.keys(f"{self.job_key_prefix}*")
+            
+            for job_key in job_keys:
+                job_data = self.redis_client.get(job_key)
+                if job_data:
+                    try:
+                        job = self._deserialize_job(job_data)
+                        if job.status == JobStatus.PROCESSING:
+                            # Mark as failed due to shutdown
+                            job.status = JobStatus.FAILED
+                            job.error_message = "Job interrupted during service shutdown"
+                            job.completed_at = datetime.now()
+                            
+                            # Update in Redis
+                            self.redis_client.set(job_key, self._serialize_job(job))
+                            interrupted_jobs.append(job.job_id)
+                    except Exception as e:
+                        logger.warning(f"Failed to process job during cleanup {job_key}: {e}")
+            
+            if interrupted_jobs:
+                logger.info(f"Marked {len(interrupted_jobs)} jobs as interrupted: {interrupted_jobs}")
+            
+            # Close Redis connection
+            if self.redis_client:
+                self.redis_client.close()
+            
+            logger.info("Job queue cleanup completed")
+            
+        except Exception as e:
+            logger.error(f"Error during job queue cleanup: {e}")
+
+
+# Global job queue instance
+_job_queue = None
+
+def get_job_queue() -> JobQueue:
+    """
+    Get the global JobQueue instance.
+    
+    Returns:
+        JobQueue instance
+    """
+    global _job_queue
+    if _job_queue is None:
+        import config
+        redis_url = f"redis://{config.REDIS_HOST}:{config.REDIS_PORT}/{config.REDIS_DB}"
+        if hasattr(config, 'REDIS_PASSWORD') and config.REDIS_PASSWORD:
+            # Insert password into URL
+            redis_url = f"redis://:{config.REDIS_PASSWORD}@{config.REDIS_HOST}:{config.REDIS_PORT}/{config.REDIS_DB}"
+        
+        _job_queue = JobQueue(redis_url)
+    return _job_queue

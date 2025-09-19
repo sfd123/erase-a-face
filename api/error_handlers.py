@@ -359,3 +359,74 @@ def create_error_response(error_type: str, message: str, status_code: int = 500,
         status_code=status_code,
         content=response_data
     )
+
+
+def setup_error_handlers(app):
+    """
+    Setup global error handlers for the FastAPI application.
+    
+    Args:
+        app: FastAPI application instance
+    """
+    from fastapi import HTTPException, Request
+    from fastapi.responses import JSONResponse
+    from fastapi.exceptions import RequestValidationError
+    from starlette.exceptions import HTTPException as StarletteHTTPException
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    @app.exception_handler(HTTPException)
+    async def http_exception_handler(request: Request, exc: HTTPException):
+        """Handle HTTP exceptions."""
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "error": "http_error",
+                "message": exc.detail,
+                "status_code": exc.status_code,
+                "timestamp": datetime.now().isoformat()
+            }
+        )
+    
+    @app.exception_handler(StarletteHTTPException)
+    async def starlette_http_exception_handler(request: Request, exc: StarletteHTTPException):
+        """Handle Starlette HTTP exceptions."""
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "error": "http_error",
+                "message": exc.detail,
+                "status_code": exc.status_code,
+                "timestamp": datetime.now().isoformat()
+            }
+        )
+    
+    @app.exception_handler(RequestValidationError)
+    async def validation_exception_handler(request: Request, exc: RequestValidationError):
+        """Handle request validation errors."""
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error": "validation_error",
+                "message": "Request validation failed",
+                "details": exc.errors(),
+                "timestamp": datetime.now().isoformat()
+            }
+        )
+    
+    @app.exception_handler(Exception)
+    async def global_exception_handler(request: Request, exc: Exception):
+        """Handle all other exceptions."""
+        logger.error(f"Unhandled exception: {exc}", exc_info=True)
+        
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": "internal_error",
+                "message": "An unexpected error occurred",
+                "timestamp": datetime.now().isoformat()
+            }
+        )
+    
+    logger.info("Error handlers setup complete")

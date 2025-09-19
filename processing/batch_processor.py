@@ -488,3 +488,77 @@ class BatchProcessor:
         except Exception as e:
             logger.error(f"Failed to get system resources: {e}")
             return {}
+    
+    async def start_processing(self) -> None:
+        """
+        Start continuous batch processing in the background.
+        
+        This method runs continuously, checking for jobs in the queue
+        and processing them in batches until shutdown is requested.
+        """
+        logger.info("Starting batch processor background service")
+        
+        try:
+            # Run continuous processing in a separate thread
+            import asyncio
+            
+            def run_continuous_processing():
+                """Run the continuous processing loop."""
+                try:
+                    self.process_queue_continuously(
+                        max_jobs_per_batch=self.config.max_concurrent_jobs,
+                        batch_timeout_seconds=60
+                    )
+                except Exception as e:
+                    logger.error(f"Error in continuous processing: {e}")
+            
+            # Start the processing in a thread
+            processing_thread = threading.Thread(
+                target=run_continuous_processing,
+                daemon=True,
+                name="BatchProcessor"
+            )
+            processing_thread.start()
+            
+            logger.info("Batch processor background service started")
+            
+            # Keep the async method running until shutdown
+            while not self._shutdown_requested:
+                await asyncio.sleep(1)
+                
+        except Exception as e:
+            logger.error(f"Failed to start batch processing: {e}")
+            raise
+
+
+# Global batch processor instance
+_batch_processor = None
+
+def get_batch_processor() -> BatchProcessor:
+    """
+    Get the global BatchProcessor instance.
+    
+    Returns:
+        BatchProcessor instance
+    """
+    global _batch_processor
+    if _batch_processor is None:
+        import config
+        
+        # Create configuration
+        batch_config = BatchProcessorConfig(
+            max_concurrent_jobs=getattr(config, 'MAX_CONCURRENT_JOBS', 2),
+            max_worker_threads=4,
+            memory_limit_per_job_mb=512,
+            cpu_usage_threshold=0.8,
+            progress_update_interval=5,
+            enable_detailed_logging=config.DEBUG,
+            enable_job_prioritization=True,
+            priority_by_file_size=True,
+            max_retry_attempts=2,
+            retry_delay_seconds=30
+        )
+        
+        _batch_processor = BatchProcessor(config=batch_config)
+    
+    return _batch_processor

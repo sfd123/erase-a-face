@@ -491,3 +491,63 @@ class FileManager:
             'temp_size_mb': round(temp_size / (1024 * 1024), 2),
             'tracked_temp_files': len(self._temp_files)
         }
+    
+    def get_storage_info(self) -> Dict[str, any]:
+        """
+        Get storage information for health checks.
+        
+        Returns:
+            Dictionary with storage information
+        """
+        stats = self.get_storage_stats()
+        
+        # Check available disk space
+        try:
+            import shutil
+            total, used, free = shutil.disk_usage(self.base_storage_path)
+            
+            stats.update({
+                'disk_total_bytes': total,
+                'disk_used_bytes': used,
+                'disk_free_bytes': free,
+                'disk_free_mb': round(free / (1024 * 1024), 2),
+                'disk_usage_percent': round((used / total) * 100, 2)
+            })
+        except Exception as e:
+            logger.warning(f"Could not get disk usage info: {e}")
+            stats['disk_info_error'] = str(e)
+        
+        return stats
+    
+    def ensure_directories(self):
+        """
+        Ensure all required directories exist.
+        
+        Creates the base storage and temp directories if they don't exist.
+        """
+        try:
+            self.base_storage_path.mkdir(parents=True, exist_ok=True)
+            self.temp_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Ensured directories exist: {self.base_storage_path}, {self.temp_dir}")
+        except Exception as e:
+            logger.error(f"Failed to create directories: {e}")
+            raise
+
+# Global file manager instance
+_file_manager = None
+
+def get_file_manager() -> FileManager:
+    """
+    Get the global FileManager instance.
+    
+    Returns:
+        FileManager instance
+    """
+    global _file_manager
+    if _file_manager is None:
+        import config
+        _file_manager = FileManager(
+            base_storage_path=str(config.UPLOAD_DIR),
+            temp_dir=str(config.TEMP_DIR)
+        )
+    return _file_manager
