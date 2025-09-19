@@ -26,7 +26,7 @@
   - Write unit tests with sample images for various lighting and angle conditions
   - _Requirements: 1.2, 2.1, 2.4, 5.1, 5.2_
 
-- [ ] 5. Develop face blurring and tracking system
+- [x] 5. Develop face blurring and tracking system
   - Implement FaceBlurrer class with Gaussian blur application
   - Add face tracking between frames using optical flow
   - Create consistent blur area sizing based on face dimensions
