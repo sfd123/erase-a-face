@@ -339,6 +339,64 @@ class FileManager:
         
         return cleaned_count
     
+    def schedule_automatic_cleanup(self, job_id: str, file_paths: List[Path], delay_hours: int = 48):
+        """
+        Schedule automatic cleanup of files after processing completion.
+        
+        Args:
+            job_id: Job ID for tracking
+            file_paths: List of file paths to clean up
+            delay_hours: Hours to wait before cleanup
+        """
+        cleanup_time = datetime.now() + timedelta(hours=delay_hours)
+        
+        # Store cleanup schedule (in production, this would be in a database or queue)
+        if not hasattr(self, '_cleanup_schedule'):
+            self._cleanup_schedule = {}
+        
+        self._cleanup_schedule[job_id] = {
+            'file_paths': [str(path) for path in file_paths],
+            'cleanup_time': cleanup_time,
+            'scheduled_at': datetime.now()
+        }
+        
+        logger.info(f"Scheduled cleanup for job {job_id} at {cleanup_time}")
+    
+    def execute_scheduled_cleanup(self) -> int:
+        """
+        Execute scheduled cleanup tasks that are due.
+        
+        Returns:
+            Number of files cleaned up
+        """
+        if not hasattr(self, '_cleanup_schedule'):
+            return 0
+        
+        current_time = datetime.now()
+        cleaned_count = 0
+        completed_jobs = []
+        
+        for job_id, schedule in self._cleanup_schedule.items():
+            if current_time >= schedule['cleanup_time']:
+                file_paths = [Path(path) for path in schedule['file_paths']]
+                
+                for file_path in file_paths:
+                    if file_path.exists():
+                        try:
+                            self.secure_delete(file_path)
+                            cleaned_count += 1
+                            logger.info(f"Automatically cleaned up file for job {job_id}: {file_path}")
+                        except Exception as e:
+                            logger.error(f"Failed to clean up scheduled file {file_path}: {e}")
+                
+                completed_jobs.append(job_id)
+        
+        # Remove completed cleanup tasks
+        for job_id in completed_jobs:
+            del self._cleanup_schedule[job_id]
+        
+        return cleaned_count
+    
     def get_file_info(self, file_path: Path) -> Dict[str, any]:
         """
         Get detailed information about a file.

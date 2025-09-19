@@ -19,6 +19,9 @@ from models.processing_job import ProcessingJob, JobStatus
 from models.validation import ValidationError, validate_filename, get_supported_formats, get_max_file_size_mb
 from storage.job_queue import JobQueue, JobQueueError
 from storage.file_manager import FileManager, FileValidationError
+from security.malware_scanner import get_malware_scanner, MalwareDetectionError
+from security.input_sanitizer import get_input_sanitizer, InputValidationError
+from security.secure_tokens import get_token_manager, TokenValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +104,10 @@ class VideoUploadHandler:
             HTTPException: For various validation and processing errors
         """
         try:
+            # Get security services
+            sanitizer = get_input_sanitizer()
+            malware_scanner = get_malware_scanner()
+            
             # Validate filename
             if not file.filename:
                 raise HTTPException(
@@ -111,7 +118,9 @@ class VideoUploadHandler:
                     }
                 )
             
-            validate_filename(file.filename)
+            # Sanitize filename
+            sanitized_filename = sanitizer.sanitize_filename(file.filename)
+            validate_filename(sanitized_filename)
             
             # Check file size
             if file.size and file.size > file_manager.MAX_FILE_SIZE:
@@ -127,21 +136,40 @@ class VideoUploadHandler:
             
             # Create processing job
             job = ProcessingJob.create_new(
-                original_filename=file.filename,
+                original_filename=sanitized_filename,
                 file_path=""  # Will be set after file storage
             )
             
             # Create temporary file for upload
-            temp_file = file_manager.create_temp_file(job.job_id, Path(file.filename).suffix)
+            temp_file = file_manager.create_temp_file(job.job_id, Path(sanitized_filename).suffix)
             
             # Save uploaded file
             with open(temp_file, "wb") as buffer:
                 content = await file.read()
                 buffer.write(content)
             
+            # Perform malware scan
+            scan_result = malware_scanner.scan_file(temp_file)
+            if not scan_result['is_safe']:
+                # Clean up temp file
+                temp_file.unlink()
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "error": "security_threat_detected",
+                        "message": "File failed security scan",
+                        "threats": scan_result['threats_detected'],
+                        "help": "Please ensure your file is a clean video file without any embedded content."
+                    }
+                )
+            
+            # Log security warnings if any
+            if scan_result['warnings']:
+                logger.warning(f"Security warnings for file {sanitized_filename}: {scan_result['warnings']}")
+            
             # Store file securely with validation
             stored_file_path = file_manager.store_uploaded_file(
-                temp_file, job.job_id, file.filename
+                temp_file, job.job_id, sanitized_filename
             )
             
             # Update job with stored file path
@@ -158,14 +186,21 @@ class VideoUploadHandler:
             
             logger.info(f"Successfully uploaded and queued job {job.job_id} for file {file.filename}")
             
+            # Schedule automatic cleanup after processing
+            file_manager.schedule_automatic_cleanup(
+                job.job_id, 
+                [stored_file_path], 
+                delay_hours=48
+            )
+            
             return UploadResponse(
                 job_id=job.job_id,
                 message="Video uploaded successfully and queued for processing",
-                original_filename=file.filename,
+                original_filename=sanitized_filename,
                 status=job.status.value
             )
             
-        except ValidationError as e:
+        except (ValidationError, InputValidationError) as e:
             # Clean up temp file on validation error
             if 'temp_file' in locals() and temp_file.exists():
                 try:
@@ -184,7 +219,7 @@ class VideoUploadHandler:
                 }
             )
         
-        except FileValidationError as e:
+        except (FileValidationError, MalwareDetectionError) as e:
             # Clean up temp file on validation error
             if 'temp_file' in locals() and temp_file.exists():
                 try:
@@ -253,7 +288,11 @@ class ProcessingStatusHandler:
             HTTPException: If job not found or queue error
         """
         try:
-            job = job_queue.get_job_status(job_id)
+            # Sanitize job ID
+            sanitizer = get_input_sanitizer()
+            clean_job_id = sanitizer.validate_job_id(job_id)
+            
+            job = job_queue.get_job_status(clean_job_id)
             
             if not job:
                 raise HTTPException(
@@ -328,7 +367,11 @@ class VideoDownloadHandler:
             HTTPException: For various error conditions
         """
         try:
-            job = job_queue.get_job_status(job_id)
+            # Sanitize job ID
+            sanitizer = get_input_sanitizer()
+            clean_job_id = sanitizer.validate_job_id(job_id)
+            
+            job = job_queue.get_job_status(clean_job_id)
             
             if not job:
                 raise HTTPException(
@@ -382,6 +425,13 @@ class VideoDownloadHandler:
             original_name = Path(job.original_filename)
             download_filename = f"anonymized_{original_name.stem}{original_name.suffix}"
             
+            # Schedule file cleanup after download
+            file_manager.schedule_automatic_cleanup(
+                clean_job_id,
+                [output_path],
+                delay_hours=24  # Clean up 24 hours after download
+            )
+            
             # Return file response
             return FileResponse(
                 path=str(output_path),
@@ -389,7 +439,7 @@ class VideoDownloadHandler:
                 media_type="application/octet-stream",
                 headers={
                     "Content-Disposition": f"attachment; filename={download_filename}",
-                    "X-Job-ID": job_id,
+                    "X-Job-ID": clean_job_id,
                     "X-Faces-Detected": str(job.faces_detected or 0)
                 }
             )
@@ -415,6 +465,162 @@ class VideoDownloadHandler:
                 detail={
                     "error": "internal_error",
                     "message": "An unexpected error occurred during file download"
+                }
+            )
+
+
+class SecureDownloadHandler:
+    """Handler for secure token-based downloads."""
+    
+    def __init__(self, job_queue: JobQueue, file_manager: FileManager):
+        self.job_queue = job_queue
+        self.file_manager = file_manager
+    
+    async def generate_secure_download_link(
+        self,
+        job_id: str,
+        base_url: str,
+        expiry_hours: int = 24
+    ) -> Dict[str, str]:
+        """
+        Generate a secure download link with expiration.
+        
+        Args:
+            job_id: Job identifier
+            base_url: Base URL for the service
+            expiry_hours: Hours until link expires
+            
+        Returns:
+            Dictionary with secure download information
+        """
+        try:
+            # Sanitize job ID
+            sanitizer = get_input_sanitizer()
+            clean_job_id = sanitizer.validate_job_id(job_id)
+            
+            # Verify job exists and is completed
+            job = self.job_queue.get_job_status(clean_job_id)
+            
+            if not job:
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "error": "job_not_found",
+                        "message": f"Job with ID {clean_job_id} not found"
+                    }
+                )
+            
+            if job.status != JobStatus.COMPLETED:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "error": "job_not_completed",
+                        "message": f"Job is not completed. Current status: {job.status.value}"
+                    }
+                )
+            
+            # Generate secure token
+            token_manager = get_token_manager()
+            secure_url = token_manager.generate_secure_download_url(
+                base_url,
+                clean_job_id,
+                job.output_file_path,
+                expiry_hours
+            )
+            
+            return {
+                "secure_download_url": secure_url,
+                "expires_in_hours": expiry_hours,
+                "job_id": clean_job_id,
+                "original_filename": job.original_filename
+            }
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to generate secure download link: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": "internal_error",
+                    "message": "Failed to generate secure download link"
+                }
+            )
+    
+    async def download_with_token(
+        self,
+        token: str
+    ) -> FileResponse:
+        """
+        Download file using secure token.
+        
+        Args:
+            token: Secure download token
+            
+        Returns:
+            FileResponse with the file
+        """
+        try:
+            # Validate token
+            token_manager = get_token_manager()
+            token_data = token_manager.validate_token(token)
+            
+            job_id = token_data['job_id']
+            file_path = Path(token_data['file_path'])
+            
+            # Verify file still exists
+            if not file_path.exists():
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "error": "file_not_found",
+                        "message": "File no longer available"
+                    }
+                )
+            
+            # Get job info for filename
+            job = self.job_queue.get_job_status(job_id)
+            if job:
+                original_name = Path(job.original_filename)
+                download_filename = f"anonymized_{original_name.stem}{original_name.suffix}"
+            else:
+                download_filename = f"anonymized_video{file_path.suffix}"
+            
+            # Schedule cleanup after download
+            self.file_manager.schedule_automatic_cleanup(
+                job_id,
+                [file_path],
+                delay_hours=24
+            )
+            
+            return FileResponse(
+                path=str(file_path),
+                filename=download_filename,
+                media_type="application/octet-stream",
+                headers={
+                    "Content-Disposition": f"attachment; filename={download_filename}",
+                    "X-Job-ID": job_id,
+                    "X-Secure-Download": "true"
+                }
+            )
+            
+        except TokenValidationError as e:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "invalid_token",
+                    "message": f"Token validation failed: {str(e)}"
+                }
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Secure download failed: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": "download_failed",
+                    "message": "Secure download failed"
                 }
             )
 

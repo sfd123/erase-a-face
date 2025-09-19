@@ -15,6 +15,7 @@ from .handlers import (
     VideoUploadHandler, 
     ProcessingStatusHandler, 
     VideoDownloadHandler,
+    SecureDownloadHandler,
     HealthCheckHandler,
     UploadResponse,
     StatusResponse,
@@ -22,6 +23,7 @@ from .handlers import (
     get_job_queue,
     get_file_manager
 )
+from security.rate_limiter import rate_limit_middleware
 from storage.job_queue import JobQueue
 from storage.file_manager import FileManager
 
@@ -37,6 +39,7 @@ api_router = APIRouter(prefix="/api/v1", tags=["video-anonymizer"])
     description="Upload a video file to be processed for face anonymization. "
                 "Supported formats: MP4, MOV, AVI. Maximum file size: 500MB."
 )
+@rate_limit_middleware('upload')
 async def upload_video(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(..., description="Video file to process"),
@@ -54,6 +57,7 @@ async def upload_video(
     summary="Get processing status",
     description="Get the current processing status of a video anonymization job."
 )
+@rate_limit_middleware('status')
 async def get_processing_status(
     job_id: str,
     job_queue: JobQueue = Depends(get_job_queue)
@@ -70,6 +74,7 @@ async def get_processing_status(
     description="Download the processed video file with anonymized faces. "
                 "Only available for completed jobs."
 )
+@rate_limit_middleware('download')
 async def download_processed_video(
     job_id: str,
     job_queue: JobQueue = Depends(get_job_queue),
@@ -78,6 +83,41 @@ async def download_processed_video(
     """Download processed video file."""
     handler = VideoDownloadHandler(job_queue, file_manager)
     return await handler.download_video(job_id, job_queue, file_manager)
+
+
+@api_router.post(
+    "/secure-download/{job_id}",
+    summary="Generate secure download link",
+    description="Generate a secure, time-limited download link for a processed video."
+)
+@rate_limit_middleware('download')
+async def generate_secure_download_link(
+    job_id: str,
+    expiry_hours: int = 24,
+    job_queue: JobQueue = Depends(get_job_queue),
+    file_manager: FileManager = Depends(get_file_manager)
+):
+    """Generate a secure download link with expiration."""
+    handler = SecureDownloadHandler(job_queue, file_manager)
+    # You would get the base URL from request or config
+    base_url = "https://your-domain.com/api/v1"  # TODO: Get from config
+    return await handler.generate_secure_download_link(job_id, base_url, expiry_hours)
+
+
+@api_router.get(
+    "/secure-download",
+    response_class=FileResponse,
+    summary="Download with secure token",
+    description="Download file using a secure token."
+)
+async def download_with_secure_token(
+    token: str,
+    job_queue: JobQueue = Depends(get_job_queue),
+    file_manager: FileManager = Depends(get_file_manager)
+) -> FileResponse:
+    """Download file using secure token."""
+    handler = SecureDownloadHandler(job_queue, file_manager)
+    return await handler.download_with_token(token)
 
 
 @api_router.get(

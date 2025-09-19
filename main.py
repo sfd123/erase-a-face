@@ -5,12 +5,14 @@ Main entry point for Golf Video Anonymizer service
 
 import logging
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
 from api.routes import api_router
+from security.input_sanitizer import get_input_sanitizer
 
 # Configure logging
 logging.basicConfig(
@@ -29,14 +31,51 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
+# Add security middleware
+app.add_middleware(
+    TrustedHostMiddleware, 
+    allowed_hosts=["localhost", "127.0.0.1", "*.yourdomain.com"]  # Configure for production
+)
+
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=["http://localhost:3000", "http://localhost:8000"],  # Configure appropriately for production
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+# Security headers middleware
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    """Add security headers to all responses."""
+    response = await call_next(request)
+    
+    # Security headers
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'"
+    
+    return response
+
+# Input sanitization middleware
+@app.middleware("http")
+async def sanitize_headers(request: Request, call_next):
+    """Sanitize request headers."""
+    sanitizer = get_input_sanitizer()
+    
+    # Sanitize headers
+    sanitized_headers = sanitizer.sanitize_headers(dict(request.headers))
+    
+    # Update request headers (this is a simplified approach)
+    # In production, you might want to reject requests with dangerous headers
+    
+    response = await call_next(request)
+    return response
 
 # Include API routes
 app.include_router(api_router)
