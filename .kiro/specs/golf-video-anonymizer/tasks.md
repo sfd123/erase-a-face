@@ -33,7 +33,7 @@
   - Write unit tests for blur quality and tracking accuracy
   - _Requirements: 1.3, 2.1, 2.2, 2.3_
 
-- [ ] 6. Build video processing pipeline
+- [x] 6. Build video processing pipeline
   - Create VideoProcessor class to orchestrate the complete pipeline
   - Implement frame-by-frame processing with face detection and blurring
   - Add video encoding with quality preservation settings
