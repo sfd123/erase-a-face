@@ -166,26 +166,40 @@ class VideoUploadHandler:
             )
             
         except ValidationError as e:
+            # Clean up temp file on validation error
+            if 'temp_file' in locals() and temp_file.exists():
+                try:
+                    temp_file.unlink()
+                except Exception as cleanup_error:
+                    logger.error(f"Failed to cleanup temp file after validation error: {cleanup_error}")
+            
             raise HTTPException(
                 status_code=400,
                 detail={
                     "error": "validation_error",
-                    "message": str(e),
-                    "supported_formats": get_supported_formats()
+                    "message": f"File validation failed: {str(e)}",
+                    "supported_formats": get_supported_formats(),
+                    "max_file_size_mb": get_max_file_size_mb(),
+                    "help": "Please ensure your file is a valid video in one of the supported formats and under the size limit."
                 }
             )
         
         except FileValidationError as e:
             # Clean up temp file on validation error
-            if temp_file.exists():
-                temp_file.unlink()
+            if 'temp_file' in locals() and temp_file.exists():
+                try:
+                    temp_file.unlink()
+                except Exception as cleanup_error:
+                    logger.error(f"Failed to cleanup temp file after validation error: {cleanup_error}")
             
             raise HTTPException(
                 status_code=422,
                 detail={
-                    "error": "validation_error",
-                    "message": str(e),
-                    "supported_formats": get_supported_formats()
+                    "error": "file_validation_error",
+                    "message": f"File content validation failed: {str(e)}",
+                    "supported_formats": get_supported_formats(),
+                    "max_file_size_mb": get_max_file_size_mb(),
+                    "help": "The file appears to be corrupted or not a valid video file. Please try uploading a different file."
                 }
             )
         

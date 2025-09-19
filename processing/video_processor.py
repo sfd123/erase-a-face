@@ -108,6 +108,7 @@ class VideoProcessor:
         """
         self.current_job = job
         self.total_faces_detected = 0
+        output_path = None
         
         try:
             # Update job status
@@ -121,6 +122,10 @@ class VideoProcessor:
             if not input_path.exists():
                 raise VideoProcessingError(f"Input video file not found: {input_path}")
             
+            # Validate video file integrity
+            if not self._validate_video_integrity(input_path):
+                raise VideoProcessingError("Video file appears to be corrupted or unreadable")
+            
             # Extract video metadata
             self.video_metadata = self._extract_video_metadata(input_path)
             if progress_callback:
@@ -132,24 +137,43 @@ class VideoProcessor:
             # Process video frames
             self._process_video_frames(input_path, output_path, progress_callback)
             
+            # Handle edge case: no faces detected
+            if self.total_faces_detected == 0:
+                logger.info(f"No faces detected in video {job.job_id}. Returning original video.")
+                if progress_callback:
+                    progress_callback(0.95, "No faces detected - preserving original video")
+                
+                # Copy original to output location if different
+                if str(input_path) != str(output_path):
+                    import shutil
+                    shutil.copy2(input_path, output_path)
+            
+            # Verify output file was created successfully
+            if not output_path.exists() or output_path.stat().st_size == 0:
+                raise VideoProcessingError("Output video file was not created successfully")
+            
             # Mark job as completed
             job.mark_completed(str(output_path), self.total_faces_detected)
             
             if progress_callback:
-                progress_callback(1.0, f"Processing complete. {self.total_faces_detected} faces detected and blurred.")
+                if self.total_faces_detected > 0:
+                    progress_callback(1.0, f"Processing complete. {self.total_faces_detected} faces detected and blurred.")
+                else:
+                    progress_callback(1.0, "Processing complete. No faces detected - original video preserved.")
             
-            logger.info(f"Video processing completed for job {job.job_id}. Output: {output_path}")
+            logger.info(f"Video processing completed for job {job.job_id}. Output: {output_path}, Faces: {self.total_faces_detected}")
             return str(output_path)
             
         except Exception as e:
-            error_msg = f"Video processing failed: {str(e)}"
+            error_msg = self._categorize_processing_error(e)
             logger.error(f"Job {job.job_id}: {error_msg}")
             job.mark_failed(error_msg)
             
             # Clean up any partial output files
-            if 'output_path' in locals() and Path(output_path).exists():
+            if output_path and Path(output_path).exists():
                 try:
                     Path(output_path).unlink()
+                    logger.info(f"Cleaned up partial output file: {output_path}")
                 except Exception as cleanup_error:
                     logger.error(f"Failed to clean up partial output file: {cleanup_error}")
             
@@ -320,9 +344,15 @@ class VideoProcessor:
             Processed frame with faces blurred
         """
         if frame is None or frame.size == 0:
+            logger.warning(f"Frame {frame_number} is empty or invalid")
             return frame
         
         try:
+            # Validate frame dimensions
+            if len(frame.shape) != 3 or frame.shape[2] != 3:
+                logger.warning(f"Frame {frame_number} has unexpected dimensions: {frame.shape}")
+                return frame
+            
             # Detect faces in the frame
             face_detections = self.face_detector.detect_faces(frame, frame_number)
             
@@ -330,9 +360,12 @@ class VideoProcessor:
             self.total_faces_detected += len(face_detections)
             
             # Apply blur to detected faces
-            blurred_frame = self.face_blurrer.blur_faces(frame, face_detections)
-            
-            return blurred_frame
+            if face_detections:
+                blurred_frame = self.face_blurrer.blur_faces(frame, face_detections)
+                return blurred_frame
+            else:
+                # No faces detected, return original frame
+                return frame
             
         except Exception as e:
             logger.warning(f"Error processing frame {frame_number}: {e}")
@@ -434,6 +467,70 @@ class VideoProcessor:
             self.face_detector = FaceDetector(self.config.face_detector_config)
         if hasattr(self.config, 'face_blurrer_config'):
             self.face_blurrer = FaceBlurrer(self.config.face_blurrer_config)
+    
+    def _validate_video_integrity(self, video_path: Path) -> bool:
+        """
+        Validate that the video file can be opened and read.
+        
+        Args:
+            video_path: Path to video file
+            
+        Returns:
+            True if video is readable, False otherwise
+        """
+        try:
+            cap = cv2.VideoCapture(str(video_path))
+            if not cap.isOpened():
+                return False
+            
+            # Try to read the first frame
+            ret, frame = cap.read()
+            cap.release()
+            
+            return ret and frame is not None and frame.size > 0
+            
+        except Exception as e:
+            logger.error(f"Video integrity check failed: {e}")
+            return False
+    
+    def _categorize_processing_error(self, error: Exception) -> str:
+        """
+        Categorize processing errors into user-friendly messages.
+        
+        Args:
+            error: The exception that occurred
+            
+        Returns:
+            Categorized error message
+        """
+        error_str = str(error).lower()
+        
+        if "could not open" in error_str or "not found" in error_str:
+            return "Video file could not be opened. The file may be corrupted or in an unsupported format."
+        
+        elif "metadata" in error_str or "extract" in error_str:
+            return "Unable to read video properties. The file may be corrupted."
+        
+        elif "codec" in error_str or "fourcc" in error_str:
+            return "Video encoding format is not supported or corrupted."
+        
+        elif "memory" in error_str or "allocation" in error_str:
+            return "Insufficient memory to process this video. Please try a smaller file."
+        
+        elif "disk" in error_str or "space" in error_str:
+            return "Insufficient disk space to process the video."
+        
+        elif "timeout" in error_str:
+            return "Video processing timed out. The video may be too long or complex."
+        
+        elif "frame" in error_str and "processing" in error_str:
+            return "Error processing video frames. The video may contain corrupted data."
+        
+        elif "audio" in error_str and "preserve" in error_str:
+            return "Video processed successfully but audio preservation failed. Video-only output provided."
+        
+        else:
+            return f"Video processing failed: {str(error)}"
     
     def cleanup_resources(self) -> None:
         """Clean up any resources used by the processor."""

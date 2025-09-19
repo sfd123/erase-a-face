@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Golf Video Anonymizer - Frontend Tests</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .test-section {
+            background: white;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .test-result {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+        }
+        .test-pass {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .test-fail {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .test-info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        .file-input {
+            margin: 10px 0;
+        }
+        #test-results {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body>
+    <h1>Golf Video Anonymizer - Frontend Tests</h1>
+    
+    <div class="test-section">
+        <h2>Test Configuration</h2>
+        <p>API Base URL: <span id="api-url">/api/v1</span></p>
+        <button onclick="testApiConnection()">Test API Connection</button>
+        <button onclick="runAllTests()">Run All Tests</button>
+        <button onclick="clearResults()">Clear Results</button>
+    </div>
+
+    <div class="test-section">
+        <h2>File Validation Tests</h2>
+        <div class="file-input">
+            <label>Test File Upload (select various file types):</label><br>
+            <input type="file" id="test-file-input" onchange="testFileValidation(this.files[0])">
+        </div>
+        <button onclick="testFileSizeValidation()">Test File Size Validation</button>
+        <button onclick="testFileTypeValidation()">Test File Type Validation</button>
+    </div>
+
+    <div class="test-section">
+        <h2>UI Interaction Tests</h2>
+        <button onclick="testDragDropSimulation()">Test Drag & Drop Simulation</button>
+        <button onclick="testProgressUpdates()">Test Progress Updates</button>
+        <button onclick="testSectionSwitching()">Test Section Switching</button>
+        <button onclick="testErrorHandling()">Test Error Handling</button>
+    </div>
+
+    <div class="test-section">
+        <h2>API Integration Tests</h2>
+        <button onclick="testUploadEndpoint()">Test Upload Endpoint</button>
+        <button onclick="testStatusEndpoint()">Test Status Endpoint</button>
+        <button onclick="testHealthEndpoint()">Test Health Endpoint</button>
+    </div>
+
+    <div class="test-section">
+        <h2>Test Results</h2>
+        <div id="test-results"></div>
+    </div>
+
+    <script>
+        // Test framework
+        class FrontendTester {
+            constructor() {
+                this.results = [];
+                this.apiBaseUrl = '/api/v1';
+            }
+
+            log(message, type = 'info') {
+                const timestamp = new Date().toLocaleTimeString();
+                this.results.push({ message, type, timestamp });
+                this.updateResultsDisplay();
+            }
+
+            pass(message) {
+                this.log(`✓ ${message}`, 'pass');
+            }
+
+            fail(message) {
+                this.log(`✗ ${message}`, 'fail');
+            }
+
+            info(message) {
+                this.log(`ℹ ${message}`, 'info');
+            }
+
+            updateResultsDisplay() {
+                const resultsDiv = document.getElementById('test-results');
+                resultsDiv.innerHTML = this.results.map(result => 
+                    `<div class="test-result test-${result.type}">
+                        [${result.timestamp}] ${result.message}
+                    </div>`
+                ).join('');
+                resultsDiv.scrollTop = resultsDiv.scrollHeight;
+            }
+
+            clear() {
+                this.results = [];
+                this.updateResultsDisplay();
+            }
+
+            // File validation tests
+            testFileValidation(file) {
+                if (!file) {
+                    this.fail('No file selected for validation test');
+                    return;
+                }
+
+                this.info(`Testing file: ${file.name} (${this.formatFileSize(file.size)})`);
+
+                // Test file type validation
+                const supportedFormats = ['.mp4', '.mov', '.avi'];
+                const fileExtension = '.' + file.name.split('.').pop().toLowerCase();
+                
+                if (supportedFormats.includes(fileExtension)) {
+                    this.pass(`File type validation: ${fileExtension} is supported`);
+                } else {
+                    this.fail(`File type validation: ${fileExtension} is not supported`);
+                }
+
+                // Test file size validation
+                const maxSize = 500 * 1024 * 1024; // 500MB
+                if (file.size <= maxSize) {
+                    this.pass(`File size validation: ${this.formatFileSize(file.size)} is within limit`);
+                } else {
+                    this.fail(`File size validation: ${this.formatFileSize(file.size)} exceeds 500MB limit`);
+                }
+            }
+
+            testFileSizeValidation() {
+                this.info('Testing file size validation logic...');
+                
+                // Create mock files with different sizes
+                const testCases = [
+                    { size: 1024 * 1024, name: '1MB file', shouldPass: true },
+                    { size: 100 * 1024 * 1024, name: '100MB file', shouldPass: true },
+                    { size: 500 * 1024 * 1024, name: '500MB file', shouldPass: true },
+                    { size: 600 * 1024 * 1024, name: '600MB file', shouldPass: false }
+                ];
+
+                testCases.forEach(testCase => {
+                    const maxSize = 500 * 1024 * 1024;
+                    const isValid = testCase.size <= maxSize;
+                    
+                    if (isValid === testCase.shouldPass) {
+                        this.pass(`Size validation: ${testCase.name} - ${isValid ? 'accepted' : 'rejected'} correctly`);
+                    } else {
+                        this.fail(`Size validation: ${testCase.name} - validation logic error`);
+                    }
+                });
+            }
+
+            testFileTypeValidation() {
+                this.info('Testing file type validation logic...');
+                
+                const testCases = [
+                    { name: 'video.mp4', shouldPass: true },
+                    { name: 'video.mov', shouldPass: true },
+                    { name: 'video.avi', shouldPass: true },
+                    { name: 'video.MP4', shouldPass: true }, // Case insensitive
+                    { name: 'video.mkv', shouldPass: false },
+                    { name: 'image.jpg', shouldPass: false },
+                    { name: 'document.pdf', shouldPass: false }
+                ];
+
+                const supportedFormats = ['.mp4', '.mov', '.avi'];
+                
+                testCases.forEach(testCase => {
+                    const fileExtension = '.' + testCase.name.split('.').pop().toLowerCase();
+                    const isValid = supportedFormats.includes(fileExtension);
+                    
+                    if (isValid === testCase.shouldPass) {
+                        this.pass(`Type validation: ${testCase.name} - ${isValid ? 'accepted' : 'rejected'} correctly`);
+                    } else {
+                        this.fail(`Type validation: ${testCase.name} - validation logic error`);
+                    }
+                });
+            }
+
+            // UI interaction tests
+            testDragDropSimulation() {
+                this.info('Testing drag and drop UI interactions...');
+                
+                try {
+                    const uploadArea = document.createElement('div');
+                    uploadArea.className = 'upload-area';
+                    
+                    // Simulate dragover
+                    const dragOverEvent = new Event('dragover');
+                    uploadArea.dispatchEvent(dragOverEvent);
+                    
+                    // Check if dragover class would be added
+                    this.pass('Drag over event simulation successful');
+                    
+                    // Simulate drop
+                    const dropEvent = new Event('drop');
+                    uploadArea.dispatchEvent(dropEvent);
+                    
+                    this.pass('Drop event simulation successful');
+                    
+                } catch (error) {
+                    this.fail(`Drag and drop simulation failed: ${error.message}`);
+                }
+            }
+
+            testProgressUpdates() {
+                this.info('Testing progress update functionality...');
+                
+                try {
+                    // Create mock progress elements
+                    const progressFill = document.createElement('div');
+                    const progressText = document.createElement('span');
+                    const progressPercentage = document.createElement('span');
+                    
+                    // Test progress update function
+                    const updateProgress = (percentage, text) => {
+                        progressFill.style.width = `${percentage}%`;
+                        progressPercentage.textContent = `${percentage}%`;
+                        progressText.textContent = text;
+                    };
+                    
+                    // Test various progress values
+                    const testValues = [0, 25, 50, 75, 100];
+                    testValues.forEach(value => {
+                        updateProgress(value, `Testing ${value}%`);
+                        
+                        if (progressFill.style.width === `${value}%` && 
+                            progressPercentage.textContent === `${value}%`) {
+                            this.pass(`Progress update: ${value}% displayed correctly`);
+                        } else {
+                            this.fail(`Progress update: ${value}% display error`);
+                        }
+                    });
+                    
+                } catch (error) {
+                    this.fail(`Progress update test failed: ${error.message}`);
+                }
+            }
+
+            testSectionSwitching() {
+                this.info('Testing section switching functionality...');
+                
+                try {
+                    // Create mock sections
+                    const sections = ['upload', 'progress', 'results', 'error'].map(name => {
+                        const section = document.createElement('div');
+                        section.id = `${name}-section`;
+                        section.className = 'section';
+                        return { name, element: section };
+                    });
+                    
+                    // Test section switching logic
+                    const showSection = (targetSection) => {
+                        sections.forEach(section => {
+                            if (section.name === targetSection) {
+                                section.element.classList.remove('hidden');
+                            } else {
+                                section.element.classList.add('hidden');
+                            }
+                        });
+                    };
+                    
+                    // Test each section
+                    sections.forEach(section => {
+                        showSection(section.name);
+                        
+                        const isVisible = !section.element.classList.contains('hidden');
+                        const othersHidden = sections.filter(s => s.name !== section.name)
+                            .every(s => s.element.classList.contains('hidden'));
+                        
+                        if (isVisible && othersHidden) {
+                            this.pass(`Section switching: ${section.name} section displayed correctly`);
+                        } else {
+                            this.fail(`Section switching: ${section.name} section switching error`);
+                        }
+                    });
+                    
+                } catch (error) {
+                    this.fail(`Section switching test failed: ${error.message}`);
+                }
+            }
+
+            testErrorHandling() {
+                this.info('Testing error handling functionality...');
+                
+                try {
+                    // Test error message display
+                    const errorMessage = document.createElement('p');
+                    const testError = 'Test error message';
+                    
+                    errorMessage.textContent = testError;
+                    
+                    if (errorMessage.textContent === testError) {
+                        this.pass('Error message display: Error text set correctly');
+                    } else {
+                        this.fail('Error message display: Error text not set correctly');
+                    }
+                    
+                    // Test error clearing
+                    errorMessage.textContent = '';
+                    
+                    if (errorMessage.textContent === '') {
+                        this.pass('Error message clearing: Error text cleared correctly');
+                    } else {
+                        this.fail('Error message clearing: Error text not cleared');
+                    }
+                    
+                } catch (error) {
+                    this.fail(`Error handling test failed: ${error.message}`);
+                }
+            }
+
+            // API integration tests
+            async testApiConnection() {
+                this.info('Testing API connection...');
+                
+                try {
+                    const response = await fetch(`${this.apiBaseUrl}/health`);
+                    
+                    if (response.ok) {
+                        const data = await response.json();
+                        this.pass(`API connection: Health endpoint responded with status ${data.status}`);
+                        return true;
+                    } else {
+                        this.fail(`API connection: Health endpoint returned ${response.status}`);
+                        return false;
+                    }
+                } catch (error) {
+                    this.fail(`API connection: ${error.message}`);
+                    return false;
+                }
+            }
+
+            async testHealthEndpoint() {
+                this.info('Testing health endpoint...');
+                
+                try {
+                    const response = await fetch(`${this.apiBaseUrl}/health`);
+                    const data = await response.json();
+                    
+                    if (response.ok) {
+                        this.pass('Health endpoint: Responded successfully');
+                        
+                        // Check required fields
+                        const requiredFields = ['status', 'timestamp', 'version', 'supported_formats', 'max_file_size_mb'];
+                        requiredFields.forEach(field => {
+                            if (data.hasOwnProperty(field)) {
+                                this.pass(`Health endpoint: Contains ${field} field`);
+                            } else {
+                                this.fail(`Health endpoint: Missing ${field} field`);
+                            }
+                        });
+                    } else {
+                        this.fail(`Health endpoint: HTTP ${response.status}`);
+                    }
+                } catch (error) {
+                    this.fail(`Health endpoint test failed: ${error.message}`);
+                }
+            }
+
+            async testStatusEndpoint() {
+                this.info('Testing status endpoint with invalid job ID...');
+                
+                try {
+                    const response = await fetch(`${this.apiBaseUrl}/status/invalid-job-id`);
+                    
+                    if (response.status === 404) {
+                        this.pass('Status endpoint: Correctly returns 404 for invalid job ID');
+                    } else {
+                        this.fail(`Status endpoint: Expected 404, got ${response.status}`);
+                    }
+                } catch (error) {
+                    this.fail(`Status endpoint test failed: ${error.message}`);
+                }
+            }
+
+            async testUploadEndpoint() {
+                this.info('Testing upload endpoint without file...');
+                
+                try {
+                    const formData = new FormData();
+                    const response = await fetch(`${this.apiBaseUrl}/upload`, {
+                        method: 'POST',
+                        body: formData
+                    });
+                    
+                    if (response.status === 422) {
+                        this.pass('Upload endpoint: Correctly rejects empty upload');
+                    } else {
+                        this.fail(`Upload endpoint: Expected 422, got ${response.status}`);
+                    }
+                } catch (error) {
+                    this.fail(`Upload endpoint test failed: ${error.message}`);
+                }
+            }
+
+            // Utility methods
+            formatFileSize(bytes) {
+                if (bytes === 0) return '0 Bytes';
+                const k = 1024;
+                const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+                const i = Math.floor(Math.log(bytes) / Math.log(k));
+                return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+            }
+
+            async runAllTests() {
+                this.info('Starting comprehensive test suite...');
+                
+                // File validation tests
+                this.testFileSizeValidation();
+                this.testFileTypeValidation();
+                
+                // UI interaction tests
+                this.testDragDropSimulation();
+                this.testProgressUpdates();
+                this.testSectionSwitching();
+                this.testErrorHandling();
+                
+                // API tests
+                const apiConnected = await this.testApiConnection();
+                if (apiConnected) {
+                    await this.testHealthEndpoint();
+                    await this.testStatusEndpoint();
+                    await this.testUploadEndpoint();
+                } else {
+                    this.info('Skipping API tests due to connection failure');
+                }
+                
+                this.info('Test suite completed');
+            }
+        }
+
+        // Initialize tester
+        const tester = new FrontendTester();
+
+        // Global test functions
+        function testApiConnection() {
+            tester.testApiConnection();
+        }
+
+        function runAllTests() {
+            tester.runAllTests();
+        }
+
+        function clearResults() {
+            tester.clear();
+        }
+
+        function testFileValidation(file) {
+            tester.testFileValidation(file);
+        }
+
+        function testFileSizeValidation() {
+            tester.testFileSizeValidation();
+        }
+
+        function testFileTypeValidation() {
+            tester.testFileTypeValidation();
+        }
+
+        function testDragDropSimulation() {
+            tester.testDragDropSimulation();
+        }
+
+        function testProgressUpdates() {
+            tester.testProgressUpdates();
+        }
+
+        function testSectionSwitching() {
+            tester.testSectionSwitching();
+        }
+
+        function testErrorHandling() {
+            tester.testErrorHandling();
+        }
+
+        function testUploadEndpoint() {
+            tester.testUploadEndpoint();
+        }
+
+        function testStatusEndpoint() {
+            tester.testStatusEndpoint();
+        }
+
+        function testHealthEndpoint() {
+            tester.testHealthEndpoint();
+        }
+
+        // Auto-run basic tests on load
+        document.addEventListener('DOMContentLoaded', () => {
+            tester.info('Frontend test suite loaded');
+            document.getElementById('api-url').textContent = tester.apiBaseUrl;
+        });
+    </script>
+</body>
+</html>

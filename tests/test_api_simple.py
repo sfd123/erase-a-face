@@ -21,12 +21,12 @@ class TestAPIEndpoints:
     """Test API endpoints with real implementation."""
     
     def test_root_endpoint(self, client):
-        """Test root endpoint."""
+        """Test root endpoint serves web interface."""
         response = client.get("/")
         assert response.status_code == 200
-        data = response.json()
-        assert data["service"] == "Golf Video Anonymizer"
-        assert data["version"] == "1.0.0"
+        # Root endpoint serves HTML web interface, not JSON
+        assert "text/html" in response.headers.get("content-type", "")
+        assert "Golf Video Anonymizer" in response.text
     
     def test_basic_health_endpoint(self, client):
         """Test basic health endpoint."""
@@ -70,7 +70,7 @@ class TestAPIEndpoints:
         )
         assert response.status_code == 422
         data = response.json()
-        assert data["detail"]["error"] == "validation_error"
+        assert data["detail"]["error"] == "file_validation_error"
         assert "format" in data["detail"]["message"].lower()
     
     def test_upload_large_file(self, client):

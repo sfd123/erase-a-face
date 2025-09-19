@@ -5,8 +5,11 @@ This module defines the REST API endpoints and integrates them
 with the handler classes.
 """
 
+import logging
 from fastapi import APIRouter, Depends, BackgroundTasks, UploadFile, File
 from fastapi.responses import FileResponse
+
+logger = logging.getLogger(__name__)
 
 from .handlers import (
     VideoUploadHandler, 
@@ -114,5 +117,65 @@ async def get_queue_stats(
             detail={
                 "error": "service_unavailable",
                 "message": "Queue statistics are currently unavailable"
+            }
+        )
+
+
+@api_router.post(
+    "/admin/cleanup",
+    summary="Force cleanup operation",
+    description="Force immediate cleanup of failed jobs and temporary files (admin endpoint)."
+)
+async def force_cleanup(
+    job_queue: JobQueue = Depends(get_job_queue),
+    file_manager: FileManager = Depends(get_file_manager)
+):
+    """Force immediate cleanup of failed jobs and temporary files."""
+    try:
+        from processing.cleanup_service import get_cleanup_service
+        cleanup_service = get_cleanup_service()
+        results = cleanup_service.force_cleanup()
+        
+        return {
+            "status": "success",
+            "message": "Cleanup operation completed",
+            "data": results
+        }
+    except Exception as e:
+        from fastapi import HTTPException
+        logger.error(f"Failed to perform cleanup: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "cleanup_failed",
+                "message": "Failed to perform cleanup operation"
+            }
+        )
+
+
+@api_router.get(
+    "/admin/cleanup/stats",
+    summary="Get cleanup statistics",
+    description="Get statistics about cleanup operations (admin endpoint)."
+)
+async def get_cleanup_stats():
+    """Get cleanup service statistics."""
+    try:
+        from processing.cleanup_service import get_cleanup_service
+        cleanup_service = get_cleanup_service()
+        stats = cleanup_service.get_cleanup_stats()
+        
+        return {
+            "status": "success",
+            "data": stats
+        }
+    except Exception as e:
+        from fastapi import HTTPException
+        logger.error(f"Failed to get cleanup stats: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "stats_unavailable",
+                "message": "Cleanup statistics are currently unavailable"
             }
         )

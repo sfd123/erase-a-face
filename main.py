@@ -8,6 +8,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from api.routes import api_router
 
@@ -40,16 +41,14 @@ app.add_middleware(
 # Include API routes
 app.include_router(api_router)
 
+# Mount static files for web interface
+app.mount("/static", StaticFiles(directory="web"), name="static")
+
 @app.get("/")
 async def root():
-    """Root endpoint with service information"""
-    return {
-        "service": "Golf Video Anonymizer",
-        "version": "1.0.0",
-        "status": "running",
-        "docs": "/docs",
-        "api": "/api/v1"
-    }
+    """Serve the web interface"""
+    from fastapi.responses import FileResponse
+    return FileResponse("web/index.html")
 
 @app.get("/health")
 async def health_check():

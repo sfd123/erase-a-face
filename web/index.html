@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Golf Video Anonymizer</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Golf Video Anonymizer</h1>
+            <p>Upload your golf swing videos to automatically blur faces for privacy protection</p>
+        </header>
+
+        <main>
+            <!-- Upload Section -->
+            <section id="upload-section" class="section">
+                <div class="upload-area" id="upload-area">
+                    <div class="upload-content">
+                        <div class="upload-icon">📹</div>
+                        <h3>Drop your video here or click to browse</h3>
+                        <p>Supported formats: MP4, MOV, AVI (max 500MB)</p>
+                        <input type="file" id="file-input" accept=".mp4,.mov,.avi" hidden>
+                        <button type="button" id="browse-btn" class="btn btn-primary">Choose File</button>
+                    </div>
+                </div>
+                
+                <div id="file-info" class="file-info hidden">
+                    <div class="file-details">
+                        <span class="file-name"></span>
+                        <span class="file-size"></span>
+                    </div>
+                    <button type="button" id="upload-btn" class="btn btn-success">Upload & Process</button>
+                    <button type="button" id="cancel-btn" class="btn btn-secondary">Cancel</button>
+                </div>
+            </section>
+
+            <!-- Progress Section -->
+            <section id="progress-section" class="section hidden">
+                <div class="progress-container">
+                    <h3>Processing Video</h3>
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="progress-fill"></div>
+                    </div>
+                    <div class="progress-info">
+                        <span id="progress-text">Uploading...</span>
+                        <span id="progress-percentage">0%</span>
+                    </div>
+                    <div class="job-info">
+                        <p><strong>Job ID:</strong> <span id="job-id"></span></p>
+                        <p><strong>File:</strong> <span id="processing-filename"></span></p>
+                        <p><strong>Status:</strong> <span id="job-status"></span></p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Results Section -->
+            <section id="results-section" class="section hidden">
+                <div class="results-container">
+                    <div class="success-message">
+                        <div class="success-icon">✅</div>
+                        <h3>Processing Complete!</h3>
+                        <p id="faces-detected-text"></p>
+                    </div>
+                    
+                    <div class="download-container">
+                        <button type="button" id="download-btn" class="btn btn-success btn-large">
+                            📥 Download Anonymized Video
+                        </button>
+                        <p class="download-info">
+                            Your processed video is ready for download. 
+                            The file will be automatically cleaned up after 24 hours.
+                        </p>
+                    </div>
+                    
+                    <div class="actions">
+                        <button type="button" id="process-another-btn" class="btn btn-primary">
+                            Process Another Video
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Error Section -->
+            <section id="error-section" class="section hidden">
+                <div class="error-container">
+                    <div class="error-icon">❌</div>
+                    <h3>Processing Failed</h3>
+                    <p id="error-message"></p>
+                    <div class="error-actions">
+                        <button type="button" id="retry-btn" class="btn btn-primary">Try Again</button>
+                        <button type="button" id="new-upload-btn" class="btn btn-secondary">Upload New File</button>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <footer>
+            <p>Golf Video Anonymizer v1.0.0 - Protecting privacy while preserving technique</p>
+        </footer>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div id="loading-overlay" class="loading-overlay hidden">
+        <div class="spinner"></div>
+        <p>Processing...</p>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
